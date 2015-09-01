@@ -1,0 +1,290 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+WORDCOUNT=30
+
+import operator
+from redditwordcommon import *
+from collections import defaultdict, Counter
+from itertools import chain
+from os.path import exists
+from glob import glob
+from pprint import pprint
+from ftplib import FTP
+from copy import deepcopy
+
+reload(sys)
+sys.setdefaultencoding('utf-8')
+
+def upload_files(path,what):
+	if 'dummy' in sys.argv:
+		return True
+	# ftpcredentials format:
+	# foo.server.tld
+	# username
+	# password
+	with closing(open(conffile('ftpcredentials'))) as f:
+		server = f.readline().strip()
+		user = f.readline().strip()
+		password = f.readline().strip()
+	conn = FTP(server)
+	conn.login(user,password)
+	os.chdir(path)
+	for filename in what:
+		with closing(open(filename,'rb')) as f:
+			conn.storbinary('STOR '+filename,f)
+	conn.quit()
+
+def write_html_table(table,filename):
+	if 'dummy' in sys.argv:
+		return True
+	print filename
+	html = ["<html>"]
+	html += ["<head><title>"+filename+"</title>"]
+	html += ["<link href='main.css' rel='stylesheet' type='text/css'>"]
+	html += ["<script type='text/javascript' src='TableSort.js'></script>"]
+	html += ["<script type='text/javascript' src='table_floating_header.js'></script>"]
+	html += ["<meta charset='utf-8' />"]
+	html += ["</head>"]
+	html += ["<body><div id='blankfield' class='blankfield'></div><table class='sortierbar'><thead>"]
+
+	toprow = table.pop(0)
+	totalrow = table.pop()
+	
+	html += ["<tr class='toprow'>"]
+	for cell in toprow:
+		if cell == 'Flair':
+			html += ["<th class='toprow flair sortierbar vorsortiert'>"+str(cell)+"</th>"]
+		elif not cell:
+			html += ["<th class='toprow count sortierbar'>"+str(cell)+"</th>"]
+		elif cell.isdigit():
+			html += ["<th class='toprow word sortierbar'>"+str(cell)+"</th>"]
+		else:
+			html += ["<th class='toprow meta sortierbar'>"+str(cell)+"</th>"]
+	html += ["</tr></thead><tbody>"]
+
+	for row in table:
+		html += "<tr class='body'>"
+		counts = row[0:4]
+		flair = row[4]
+		words = row[5:]
+		words = (words + ['']*(WORDCOUNT*2-len(words)))[:WORDCOUNT*2]
+		words = zip(words[0::2],words[1::2])
+		html += ["<td class='count meta'>"+str(counts[0])+"</td><td class='count meta'>"+str(counts[1])+"</td><td class='count meta'>"+str(counts[2])+"</td><td class='count meta'>"+str(counts[3])+"</td>"]
+		html += ["<td class='flair'>"+flair+"</td>"]
+		for word in words:
+			html += ["<td class='count body'>"+str(word[0])+"</td><td class='word body'>"+word[1]+"</td>"]
+
+	html += ["</tbody><tfoot><tr class='total'>"]
+	metatotal = totalrow[:5]
+	flair = metatotal.pop()
+	totalrow = totalrow[5:]
+	for cell in metatotal:
+		html += ["<td class='total meta count'>"+str(cell)+"</td>"]
+	html += ["<td class='total flair'>TOTAL</td>"]
+	for cell in totalrow:
+		if type(cell) == int or cell.isdigit(): html += ["<td class='total count'>"+str(cell)+"</td>"]
+		else:  html += ["<td class='total word'>"+str(cell)+"</td>"]
+	html += ["</tr></tfoot>"]
+
+	html += ["</table></body></html>"]
+
+	write_data(filename,''.join(html).encode('ascii', 'xmlcharrefreplace'))
+
+def dict2str(what):
+	if type(what) == str or type(what) == unicode: return '"'+str(what.encode('utf-8'))+'"'
+	if type(what) == dict: return str(str(({ k.encode('utf-8') : what[k].encode('utf-8') for k in what })).replace("'",'"').encode('utf-8'))
+
+def fw(where, what):
+	where.write(str(what.encode('utf-8')))
+
+db = sqlite3.connect(datafile('words.db'))
+c = db.cursor()
+c.row_factory = sqlite3.Row
+
+subreddits = dict(c.execute("SELECT * FROM subreddits"))
+
+for sub in subreddits:
+	try:
+		read_json(flairfile('flairs.'+sub))
+		read_json(flairfile('flairs.new.'+sub))
+		read_json(flairfile('flairs.all.'+sub))
+	except:
+		print "INVALID FLAIR FILE: "+sub
+		raise
+		exit(1)
+
+upper = read_structured_data(conffile('upper'))
+
+def topwordquery(c,sub):
+	query = '''SELECT word,SUM(count) AS count FROM words WHERE subreddit=? GROUP BY word ORDER BY count DESC LIMIT ?;'''
+	return c.execute(query,(sub,WORDCOUNT))
+
+def wordquery(c,sub,exclude=''):
+	if exclude:
+		exclude = "'"+"','".join(exclude)+"'"
+	query = "SELECT DISTINCT flair_class FROM users WHERE subreddit='"+sub+"';"
+	flairs = []
+	for row in c.execute(query): flairs += [row['flair_class']]
+	wordlists = {}
+	for flair in flairs:
+		print flair+", ",
+		sys.stdout.flush()
+		wordlists[flair] = {}
+		query = '''SELECT word,count FROM words
+				WHERE flair_class=? 
+					AND 
+				word NOT IN ('''+exclude+''')
+					AND
+				subreddit=?
+				ORDER BY count DESC LIMIT ?;'''
+		for word in c.execute(query,(flair,sub,WORDCOUNT)):
+			wordlists[flair][word['word']] = word['count']
+	return wordlists
+
+def countquery(c,sub):
+	query = '''SELECT flair_class,SUM(count) AS posts,SUM(words) AS word,SUM(users) AS users FROM
+		(SELECT flair_class,SUM(count) AS count,SUM(words) AS words,COUNT(*) AS users FROM users WHERE subreddit=? GROUP BY flair_class
+		UNION ALL
+		SELECT flair_class,count,words,users FROM oldcounts WHERE subreddit=?)
+		GROUP BY flair_class;'''
+	return list(c.execute(query,(sub,sub)))
+
+def makebody(summary):
+	return sorted([ [summary[flair]['users'],
+		summary[flair]['posts'],
+		summary[flair]['users'] and int(round(float(summary[flair]['posts']) / summary[flair]['users'])) or 0,
+		summary[flair]['posts'] and int(round(float(summary[flair]['words']) / summary[flair]['posts'])) or 0,
+		summary[flair]['name']] +
+		list(chain(*[
+			[str(word[1]),word[0] in upper and word[0].upper() or word[0].capitalize()] for word in sorted(summary[flair]['wordlist'].items(), key=operator.itemgetter(1), reverse=True)
+		]))
+		for flair in summary.keys() if 'wordlist' in summary[flair].keys() ], key=operator.itemgetter(4))
+
+def tables_from_query(name,words,summary_original,toprow,lastrow):
+	summary = deepcopy(summary_original)
+	print
+	print "Generating long table "+name
+	
+	for flair_class in words:
+		summary[flair_class]['wordlist'] = {}
+		for word in words[flair_class]:
+			summary[flair_class]['wordlist'][word] = words[flair_class][word]
+	summary = {flair:summary[flair] for flair in summary if set(['posts','users','words','wordlist']) <= set(summary[flair].keys())}
+	write_html_table([toprow]+makebody(summary)+[lastrow],resultfile(name+'-long.html'))
+	
+	print
+	print "Generating short table "+name
+	
+	groupsummary = {flair:summary[flair] for flair in summary if summary[flair]['group'] == flair}
+	for flair in {flair:summary[flair] for flair in summary if summary[flair]['group'] in groupsummary.keys()}:
+		if summary[flair]['group'] == flair: continue
+		groupsummary[summary[flair]['group']]['posts'] += summary[flair]['posts']
+		groupsummary[summary[flair]['group']]['users'] += summary[flair]['users']
+		groupsummary[summary[flair]['group']]['words'] += summary[flair]['words']
+		for word in summary[flair]['wordlist']:
+			if word not in groupsummary[summary[flair]['group']]['wordlist']:
+				groupsummary[summary[flair]['group']]['wordlist'][word] = 0
+			groupsummary[summary[flair]['group']]['wordlist'][word] += summary[flair]['wordlist'][word]
+	write_html_table([toprow]+makebody(groupsummary)+[lastrow],resultfile(name+'-short.html'))
+
+for sub in subreddits:
+	print
+	print "Parsing data"
+
+	newflairs = read_json(flairfile('flairs.new.'+sub))
+	allflairs = read_json(flairfile('flairs.all.'+sub))
+	
+	flairdata = read_json(flairfile('flairs.'+sub))
+	
+	summary = {}
+	for group in flairdata:
+		for flair_class in flairdata[group]:
+			summary[flair_class] = {}
+			summary[flair_class]['group'] = group
+			name = flairdata[group][flair_class]
+			if group == name:
+				print "Not properly named yet: "+flair_class
+			summary[flair_class]['name'] = name
+		
+	totalposts = 0
+	totalwords = 0
+	totalusers = 0
+	counts = countquery(c,sub)
+	
+	for flair_class in counts:
+		posts = flair_class[1]
+		words = flair_class[2]
+		users = flair_class[3]
+		flair_class = flair_class[0]
+		
+		totalposts += posts
+		totalwords += words
+		totalusers += users
+		
+		if flair_class not in summary.keys():
+			summary[flair_class] = {}
+			summary[flair_class]['group'] = flair_class
+			summary[flair_class]['name'] = flair_class
+			if flair_class in allflairs.keys():
+				if type(allflairs[flair_class]) == dict:
+					flairdata[flair_class] = { flair_class: allflairs[flair_class][flair_class] }
+				else:
+					newflairs[flair_class] = allflairs[flair_class]
+			else:
+				newflairs[flair_class] = flair_class
+			print "New flair: "+flair_class
+		
+		summary[flair_class]['users'] = users
+		summary[flair_class]['posts'] = posts
+		summary[flair_class]['words'] = words
+	
+	print
+	print "Rewriting flairs"
+	
+	write_json(flairfile('flairs.new.'+sub),newflairs)
+	backup(flairfile('flairs.'+sub))
+	with closing(open(flairfile('flairs.'+sub),'w')) as f:
+		f.write('{\n')
+		first = True
+		for group in sorted(flairdata.keys()):
+			if not first:
+				f.write(',\n')
+			first = False
+			if len(flairdata[group].keys()) == 1:
+				f.write('"'+group+'" : { "'+group+'" : "'+flairdata[group][group]+'" }')
+			else:
+				f.write('"'+group+'" : {\n    "'+(group+'"').ljust(23)+' : "'+flairdata[group][group]+'",\n')
+				del flairdata[group][group]
+				f.write(',\n'.join(sorted(['    "'+(flair_class+'"').ljust(23)+' : "'+flairdata[group][flair_class]+'"' for flair_class in flairdata[group]])))
+				f.write(' }')
+		f.write('\n}\n')
+	
+	print
+	print "Querying total top words"
+	
+	topwords = topwordquery(c,sub)
+	top = ()
+	toplist = []
+	
+	for word in topwords:
+		top += ({'word':word[0],'count':word[1]},)
+		toplist += [word[0]]
+
+	toprow = ['Users','Total Posts','Per User','Avg. Words','Flair']+list(chain(*[['',str(i)] for i in range(1,WORDCOUNT+1)]))
+	lastrow = [totalusers,totalposts,totalposts / totalusers,totalwords / totalposts,'TOTAL']+list(chain(*[[word['count'],word['word']] for word in top]))
+
+	print
+	print "Querying unfiltered - ",
+
+	tables_from_query(sub,wordquery(c,sub),summary,toprow,lastrow)
+	
+	print
+	print "Querying filtered - ",
+	
+	tables_from_query(sub+'-filtered',wordquery(c,sub,toplist),summary,toprow,lastrow)
+
+	print
+	print "Uploading HTML files"
+
+	upload_files(RESULTDIR,[sub+'-short.html',sub+'-long.html',sub+'-filtered-short.html',sub+'-filtered-long.html'])

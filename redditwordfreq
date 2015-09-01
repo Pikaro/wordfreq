@@ -1,0 +1,128 @@
+#!/usr/bin/python
+
+# Set timeout for fetching from reddit
+
+import socket
+socket.setdefaulttimeout(5)
+
+from redditwordcommon import *
+
+db = sqlite3.connect(datafile('words.db'))
+c = db.cursor()
+c.row_factory = sqlite3.Row
+
+os.chdir(CONFDIR)
+
+# Identifier for reddit API
+maintainer = read_data(conffile('maintainer')).strip().split()[0]
+versionnumber = read_data(conffile('version')).strip().split()[0]
+class AppURLopener(urllib.FancyURLopener):
+	version = "wordfreq_bot maintained by /u/"+maintainer+" / v"+versionnumber
+urllib._urlopener = AppURLopener()
+
+starttime = time()
+
+check_subreddits = dict(c.execute("SELECT * FROM subreddits"))
+
+print
+print "### Fetching data stage"
+print
+
+postlog = {}
+total_comments = {}
+
+for sub in check_subreddits:
+		postlog[sub] = []
+
+		print
+		print "Parsing comments from "+sub+"..."
+		
+		basequery = 'http://reddit.com/r/'+sub+'/comments/.json?sort=new&limit=100'
+		after = ''
+
+		lastseen = 0
+		pagecount = 1
+		count = 0
+
+		if sub not in total_comments.keys(): total_comments[sub] = {}
+
+		class Done(Exception): pass
+		try:
+			while True:
+				# IMPORTANT: Don't break API guidelines!
+				sleep(REDDIT_REQUIRED_SLEEP)
+
+				print "  Reading page "+str(pagecount)
+
+				response = get_json_from_url(basequery+after)
+
+				print "      Parsing page "+str(pagecount)
+
+				for comment in response['children']:
+					comment = comment['data']
+					if comment['created_utc'] <= check_subreddits[sub]:
+						raise Done
+
+					if count == 0: lastseen = comment['created_utc']
+						
+					body = comment['body']
+					author = comment['author']
+					flair = comment['author_flair_css_class'] or 'None'
+
+					postlog[sub] += [{'body':body,'flair':flair,'author':author,'wordcount':len(body.split())}]
+					count += 1
+
+				if not response['after']:	raise Done
+				else: 						after = '&after='+response['after']
+
+				parsedtime = comment['created_utc']
+				parseddiff = parsedtime - check_subreddits[sub]
+				print "      Total of "+str(count)+" comments for "+sub+" now"
+				print "      Time now: "+str(parsedtime)+", "+str(parseddiff)+"s to go back"
+				print "  Next page URL: "+basequery+after
+				pagecount += 1
+
+		except Done: pass
+		print "Total of "+str(count)+" comments for "+sub
+
+		if lastseen: check_subreddits[sub] = lastseen
+
+print
+print "### Counting stage"
+print
+
+for sub in postlog:
+	print "Counting sub "+sub
+	c.execute("INSERT OR REPLACE INTO subreddits VALUES (?,?)",(sub,check_subreddits[sub]))
+	for comment in postlog[sub]:
+		author = comment['author']
+		flair = comment['flair']
+		wordcount = comment['wordcount']
+		oldhash = hashlib.md5(author+flair).hexdigest()
+		if c.execute("SELECT * FROM oldusers WHERE subreddit=? AND hash=?",(sub,oldhash)).fetchone():
+			print "    Found old user "+author+" with flair "+flair+" and hash "+oldhash
+			c.execute("DELETE FROM oldusers WHERE subreddit=? AND hash=?",(sub,oldhash))
+			c.execute("UPDATE oldcounts SET users=users-1 WHERE subreddit=? AND flair_class=?",(sub,flair))
+		comment['body'] = re.sub(u"[^\w' ]"," ",comment['body'].lower(),flags=re.UNICODE)
+		comment['body'] = re.sub(u"\w+'\w+","",comment['body'],flags=re.UNICODE)
+		comment['body'] = re.sub(u'[\d]',' ',comment['body'],flags=re.UNICODE)
+		comment['body'] = comment['body'].replace("'","")
+		valid = 0
+		invalid = 0
+		for word in comment['body'].split():
+			if not invalid_word(word):
+				h = hashlib.md5((word+sub+flair).encode('utf-8')).hexdigest()
+				c.execute("INSERT OR IGNORE INTO words VALUES(?,?,?,?,?)",(h,sub,flair,word,0))
+				c.execute("UPDATE words SET count=count+1 WHERE hash=?",(h,))
+				valid += 1
+			else:
+				invalid += 1
+		print "    "+str(valid)+" valid and "+str(invalid)+" invalid words for "+author+" with flair "+flair
+		h = hashlib.md5((author+sub+flair).encode('utf-8')).hexdigest()
+		c.execute("INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,?)",(h,sub,flair,author,0,0))
+		c.execute("UPDATE users SET count=count+1, words=words+? WHERE hash=?",(wordcount,h))
+
+db.commit()
+db.close()
+
+print "Done!"

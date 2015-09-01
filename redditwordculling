@@ -1,0 +1,100 @@
+#!/usr/bin/python
+
+from redditwordcommon import *
+import numpy
+import operator
+
+merges = {}
+mergef = read_data(conffile('merge')).strip().splitlines()
+for merge in mergef:
+	merge = merge.strip().split()
+	main = merge.pop(0).strip()
+	for word in merge:
+		merges[word.strip()] = main
+
+db = sqlite3.connect(datafile('words.db'))
+c = db.cursor()
+c.row_factory = sqlite3.Row
+check_subreddits = dict(c.execute("SELECT * FROM subreddits"))
+
+hard = 0
+invalid = 0
+merge = 0
+prune = 0
+
+for sub in check_subreddits:
+	subhard = 0
+	subinvalid = 0
+	submerge = 0
+	subprune = 0
+	
+	for row in list(c.execute("SELECT DISTINCT flair_class FROM words WHERE subreddit=?",(sub,))):
+		flairhard = 0
+		flairinvalid = 0
+		flairmerge = 0
+		flairprune = 0
+		
+		flair = row['flair_class']
+		print sub+" - Checking "+flair
+		topavg = numpy.median([item[0] for item in c.execute("SELECT count FROM words WHERE flair_class=? AND subreddit=? ORDER BY count DESC LIMIT 10",(flair,sub))] or [0])
+		for word in list(c.execute("SELECT hash,word,count FROM words WHERE flair_class=? AND subreddit=?",(flair,sub))):
+			count = word[2]
+			h = word[0]
+			word = word[1]
+			if word in merges:
+				word_base = merges[word]
+				newh = hashlib.md5((word_base+sub+flair).encode('utf-8')).hexdigest()
+				basecount = (c.execute("SELECT count FROM words WHERE hash=?",(newh,)).fetchone() or [0])[0]
+				print (sub+" - "+((flair+":").ljust(15))+"Hard Merge: "+word+" with "+str(count)+" into "+word_base+" with "+str(basecount)).encode('utf-8')
+				c.execute("INSERT OR IGNORE INTO words VALUES(?,?,?,?,?)",(newh,sub,flair,word_base,0))
+				c.execute("UPDATE words SET count=count+? WHERE hash=?",(count,newh))
+				c.execute("DELETE FROM words WHERE hash=?",(h,))
+				flairhard += 1
+				continue				
+
+			if invalid_word(word):
+				print (sub+" - "+((flair+":").ljust(15))+"Invalid: "+word).encode('utf-8')
+				c.execute("DELETE FROM words WHERE hash=?",(h,))
+				flairinvalid += 1
+				continue
+
+			word_base = wordforms_regex.sub('',word)
+			if word_base != word:
+				newh = hashlib.md5((word_base+sub+flair).encode('utf-8')).hexdigest()
+				basecount = (c.execute("SELECT count FROM words WHERE hash=?",(newh,)).fetchone() or [0])[0]
+				if basecount >= count:				
+					print (sub+" - "+((flair+":").ljust(15))+"Merging: "+word+" with "+str(count)+" into "+word_base+" with "+str(basecount)).encode('utf-8')
+					c.execute("UPDATE words SET count=count+? WHERE hash=?",(count,newh))
+					c.execute("DELETE FROM words WHERE hash=?",(h,))
+					flairmerge += 1
+					continue
+				else:
+					#print (sub+" - "+flair.ljust(22)+": Too common: "+word+" with "+str(count)+" compared to "+word_base+" with "+str(basecount)).encode('utf-8')
+					pass
+
+			if topavg > 100 and count < topavg / 100:
+				print (sub+" - "+((flair+":").ljust(15))+"Pruning: "+word+" with "+str(count)+" vs topavg "+str(topavg)).encode('utf-8')
+				c.execute("DELETE FROM words WHERE hash=?",(h,))
+				flairprune += 1
+				continue
+
+		print sub+" - "+flair+": TOTAL: "+str(flairhard)+" hard merges, "+str(flairinvalid)+" invalid, "+str(flairmerge)+" merges, "+str(flairprune)+" pruned"
+		print
+		
+		subhard += flairhard
+		subinvalid += flairinvalid
+		submerge += flairmerge
+		subprune += flairprune
+
+	print sub+" - TOTAL: "+str(subhard)+" hard merges, "+str(subinvalid)+" invalid, "+str(submerge)+" merges, "+str(subprune)+" pruned"
+	print
+	
+	hard += subhard
+	invalid += subinvalid
+	merge += submerge
+	prune += subprune
+
+print "TOTAL: "+str(hard)+" hard merges, "+str(invalid)+" invalid, "+str(merge)+" merges, "+str(prune)+" pruned"
+
+db.commit()
+db.close()
