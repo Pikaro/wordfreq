@@ -128,7 +128,7 @@ def wordquery(c,sub,exclude=''):
 	for row in c.execute(query): flairs += [row['flair_class']]
 	wordlists = {}
 	for flair in flairs:
-		print flair+", ",
+		print flair+",",
 		sys.stdout.flush()
 		wordlists[flair] = {}
 		query = '''SELECT word,count FROM words
@@ -297,4 +297,4 @@ for sub in subreddits:
 print
 print "Uploading meta files"
 
-upload_files(CONFDIR,['mostcommon','mostcommon-regex','merge'])
+upload_files(CONFDIR,['mostcommon','mostcommon_regex','merge'])
