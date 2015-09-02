@@ -118,6 +118,7 @@ def make_mostcommon():
 
 mostcommon = None
 def invalid_word(word):
-	if not mostcommon: make_mostcommon()	
-	return word in mostcommon or wordforms_regex.sub('',word) in mostcommon or mostcommon_regex.match(word) or len(word)>12
+	if not mostcommon: make_mostcommon()
+	abbreviations = read_structured_data(conffile('upper'))
+	return word in mostcommon or wordforms_regex.sub('',word) in mostcommon or mostcommon_regex.match(word) or len(word)>12 or (len(word) < 3 and word not in abbreviations)
 

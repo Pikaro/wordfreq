@@ -107,6 +107,7 @@ for sub in postlog:
 		comment['body'] = re.sub(u"\w+'\w+","",comment['body'],flags=re.UNICODE)
 		comment['body'] = re.sub(u'[\d]',' ',comment['body'],flags=re.UNICODE)
 		comment['body'] = comment['body'].replace("'","")
+		comment['body'] = comment['body'].replace("_"," ")
 		valid = 0
 		invalid = 0
 		for word in comment['body'].split():

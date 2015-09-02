@@ -288,3 +288,13 @@ for sub in subreddits:
 	print "Uploading HTML files"
 
 	upload_files(RESULTDIR,[sub+'-short.html',sub+'-long.html',sub+'-filtered-short.html',sub+'-filtered-long.html'])
+
+	print
+	print "Uploading flairs"
+
+	upload_files(FLAIRDIR,['flairs.'+sub])
+
+print
+print "Uploading meta files"
+
+upload_files(CONFDIR,['mostcommon','mostcommon-regex','merge'])
