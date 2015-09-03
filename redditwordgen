@@ -1,7 +1,7 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-WORDCOUNT=30
+WORDCOUNT=20
 
 import operator
 from redditwordcommon import *
@@ -66,6 +66,7 @@ def write_html_table(table,filename):
 	for row in table:
 		html += "<tr class='body'>"
 		counts = row[0:4]
+		if counts[1] < 20: continue
 		flair = row[4]
 		words = row[5:]
 		words = (words + ['']*(WORDCOUNT*2-len(words)))[:WORDCOUNT*2]
